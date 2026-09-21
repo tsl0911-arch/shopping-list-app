@@ -44,6 +44,15 @@
   }
   h1 { margin: 0 0 4px; font-size: 26px; }
   .summary { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+  .error {
+    margin: 0 0 16px;
+    padding: 10px 14px;
+    font-size: 14px;
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border-radius: 10px;
+  }
+  .error[hidden] { display: none; }
 
   form { display: flex; gap: 8px; margin-bottom: 16px; }
   input[type="text"] {
@@ -134,6 +143,7 @@
 <main>
   <h1>🛒 쇼핑 리스트</h1>
   <p class="summary" id="summary"></p>
+  <p class="error" id="error" role="alert" hidden></p>
 
   <form id="form">
     <input type="text" id="input" placeholder="사야 할 물건을 입력하세요" autocomplete="off" autofocus>
@@ -147,53 +157,136 @@
   </div>
 </main>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-  const STORAGE_KEY = "shopping-list-items";
+  const SUPABASE_URL = "https://udsawdzzpqtwxxycaxwf.supabase.co";
+  // 공개용(publishable) 키라서 브라우저에 노출되어도 된다. 접근 범위는 RLS 정책이 제한한다.
+  const SUPABASE_KEY = "sb_publishable_RAyuZdwduGCGBnp_Xiarww_6t_nvzR0";
+  const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
   const form = document.getElementById("form");
   const input = document.getElementById("input");
   const list = document.getElementById("list");
   const summary = document.getElementById("summary");
   const clearBtn = document.getElementById("clear");
+  const errorBox = document.getElementById("error");
 
-  let items = load();
+  let items = [];
+  let loading = true;
 
-  function load() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      return Array.isArray(saved) ? saved : [];
-    } catch {
-      return [];
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.hidden = !message;
+  }
+
+  // 실패하면 에러를 표시하고 false를 돌려준다.
+  function check(error, message) {
+    if (!error) return true;
+    console.error(error);
+    showError(message);
+    return false;
+  }
+
+  async function load() {
+    const { data, error } = await db
+      .from("shopping_items")
+      .select("id, text, done")
+      .order("created_at")
+      .order("id");
+    loading = false;
+    if (check(error, "목록을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.")) {
+      showError("");
+      items = data;
     }
+    render();
   }
 
-  function save() {
+  // localStorage 시절의 항목을 Supabase로 한 번 옮긴다. 모든 사용자가 옮긴 뒤에는 지워도 된다.
+  const LEGACY_KEY = "shopping-list-items";
+
+  // 옮길 게 없거나 옮기기에 성공하면 true. 실패하면 원본을 남겨 두고 false.
+  async function importLegacy() {
+    let legacy;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+      legacy = JSON.parse(localStorage.getItem(LEGACY_KEY));
+    } catch {
+      return true;
+    }
+    if (!Array.isArray(legacy)) return true;
+
+    const rows = legacy
+      .filter(i => i && typeof i.text === "string" && i.text.trim())
+      .map(i => ({ text: i.text.trim(), done: !!i.done }));
+    if (rows.length) {
+      const { error } = await db.from("shopping_items").insert(rows);
+      if (error) {
+        console.error(error);
+        return false;
+      }
+    }
+    try {
+      localStorage.removeItem(LEGACY_KEY);
     } catch {}
+    return true;
   }
 
-  function addItem(text) {
-    items.push({ id: Date.now() + Math.random(), text, done: false });
-    save();
+  async function addItem(text) {
+    const { data, error } = await db
+      .from("shopping_items")
+      .insert({ text })
+      .select("id, text, done")
+      .single();
+    if (!check(error, "항목을 추가하지 못했어요.")) return false;
+    showError("");
+    items.push(data);
     render();
+    return true;
   }
 
-  function toggleItem(id) {
+  async function toggleItem(id) {
     const item = items.find(i => i.id === id);
-    if (item) item.done = !item.done;
-    save();
+    if (!item) return;
+    const { error } = await db
+      .from("shopping_items")
+      .update({ done: !item.done })
+      .eq("id", id);
+    if (check(error, "상태를 변경하지 못했어요.")) {
+      showError("");
+      item.done = !item.done;
+    }
     render();
   }
 
-  function deleteItem(id) {
-    items = items.filter(i => i.id !== id);
-    save();
+  async function deleteItem(id) {
+    const { error } = await db.from("shopping_items").delete().eq("id", id);
+    if (check(error, "항목을 삭제하지 못했어요.")) {
+      showError("");
+      items = items.filter(i => i.id !== id);
+    }
+    render();
+  }
+
+  async function clearDone() {
+    const { error } = await db.from("shopping_items").delete().eq("done", true);
+    if (check(error, "체크한 항목을 삭제하지 못했어요.")) {
+      showError("");
+      items = items.filter(i => !i.done);
+    }
     render();
   }
 
   function render() {
     list.replaceChildren();
+
+    if (loading) {
+      const msg = document.createElement("li");
+      msg.className = "empty";
+      msg.textContent = "불러오는 중…";
+      list.append(msg);
+      summary.textContent = "";
+      clearBtn.hidden = true;
+      return;
+    }
 
     if (items.length === 0) {
       const empty = document.createElement("li");
@@ -236,22 +329,23 @@
     clearBtn.hidden = doneCount === 0;
   }
 
-  form.addEventListener("submit", e => {
+  form.addEventListener("submit", async e => {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    addItem(text);
-    input.value = "";
+    // 저장에 성공했을 때만 입력창을 비워서, 실패해도 입력한 내용이 남도록 한다.
+    if (await addItem(text)) input.value = "";
     input.focus();
   });
 
-  clearBtn.addEventListener("click", () => {
-    items = items.filter(i => !i.done);
-    save();
-    render();
-  });
+  clearBtn.addEventListener("click", clearDone);
 
   render();
+  (async () => {
+    const imported = await importLegacy();
+    await load();
+    if (!imported) showError("기존 항목을 옮기지 못했어요. 새로고침하면 다시 시도해요.");
+  })();
 </script>
 </body>
 </html>
